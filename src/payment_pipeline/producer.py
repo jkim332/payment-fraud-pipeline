@@ -106,7 +106,6 @@ def main() -> None:
                     LOG.info("produced %s events", sent)
             except KafkaError:
                 LOG.exception("Kafka publish failed")
-            producer.poll(0)
             time.sleep(max(0.0, interval - (time.monotonic() - started)))
     except KeyboardInterrupt:
         LOG.info("stopping producer")
