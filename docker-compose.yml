@@ -1,0 +1,115 @@
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    ports:
+      - "9092:9094"
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,PLAINTEXT_HOST://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --topic "$${KAFKA_TOPIC:-payments}"
+        --partitions 3 --replication-factor 1;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --describe --topic "$${KAFKA_TOPIC:-payments}"
+    environment:
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-payments}
+    restart: "no"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    ports:
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-payments}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-payments_app}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-change-me-local}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  consumer:
+    build: .
+    command: ["python", "-m", "payment_pipeline.consumer"]
+    env_file: .env
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    restart: on-failure
+
+  producer:
+    build: .
+    command: ["python", "-m", "payment_pipeline.producer"]
+    env_file: .env
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-local}
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-payments_app}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-change-me-local}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-payments}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
+  clickhouse-data:
+  grafana-data:
